@@ -1,21 +1,6 @@
 
 name: Recolector deportivo
 
-      - name: Comprobar conexión configurada
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          python - <<'PY'
-          import os
-          from sqlalchemy.engine import make_url
-
-          url = make_url(os.environ["DATABASE_URL"])
-          print("Usuario:", url.username)
-          print("Servidor:", url.host)
-          print("Puerto:", url.port)
-          print("Base de datos:", url.database)
-          PY
-
 on:
   schedule:
     - cron: "17 * * * *"
