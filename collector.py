@@ -47,7 +47,7 @@ from difflib import SequenceMatcher
 
 import requests
 from sqlalchemy import (Column, DateTime, Integer, MetaData, String, Table,
-                        Text, create_engine, delete, func, inspect, select,
+                        Text, create_engine, delete, func, inspect, or_, select,
                         text, tuple_)
 
 try:
@@ -86,6 +86,55 @@ LEAGUES = [
     ("soccer", "fifa.cwc", "Mundial de Clubes"),
     ("soccer", "conmebol.libertadores", "Libertadores"),
     ("soccer", "fifa.world", "Mundial FIFA"),
+    # ── clasificatorias y copas internacionales de clubes ──
+    ("soccer", "uefa.champions_qual", "Champions League (clasificación)"),
+    ("soccer", "uefa.europa_qual", "Europa League (clasificación)"),
+    ("soccer", "uefa.europa.conf_qual", "Conference League (clasificación)"),
+    ("soccer", "fifa.intercontinental_cup", "Copa Intercontinental FIFA"),
+    ("soccer", "conmebol.recopa", "Recopa Sudamericana"),
+    ("soccer", "concacaf.champions", "CONCACAF Champions Cup"),
+    ("soccer", "concacaf.leagues.cup", "Leagues Cup"),
+    ("soccer", "concacaf.central.american.cup", "Copa Centroamericana CONCACAF"),
+    ("soccer", "afc.champions", "Liga de Campeones de Asia (Elite)"),
+    ("soccer", "afc.cup", "Liga de Campeones de Asia 2"),
+    ("soccer", "caf.champions", "Liga de Campeones de la CAF"),
+    ("soccer", "caf.confed", "Copa Confederación CAF"),
+    # ── Argentina ──
+    ("soccer", "arg.1", "Liga Profesional (Argentina)"),
+    ("soccer", "arg.copa", "Copa Argentina"),
+    ("soccer", "arg.supercopa", "Supercopa Argentina"),
+    # ── Brasil ──
+    ("soccer", "bra.1", "Brasileirão Serie A"),
+    ("soccer", "bra.2", "Brasileirão Serie B"),
+    ("soccer", "bra.copa_do_brazil", "Copa do Brasil"),
+    ("soccer", "bra.supercopa", "Supercopa do Brasil"),
+    ("soccer", "bra.camp.paulista", "Paulistão"),
+    ("soccer", "bra.camp.carioca", "Campeonato Carioca"),
+    ("soccer", "bra.camp.mineiro", "Campeonato Mineiro"),
+    ("soccer", "bra.camp.gaucho", "Campeonato Gaúcho"),
+    # ── México ──
+    ("soccer", "mex.1", "Liga MX"),
+    ("soccer", "mex.campeon", "Campeón de Campeones (México)"),
+    # ── Países Bajos ──
+    ("soccer", "ned.1", "Eredivisie"),
+    ("soccer", "ned.cup", "KNVB Beker (Copa de Holanda)"),
+    ("soccer", "ned.supercup", "Johan Cruyff Schaal"),
+    # ── Portugal ──
+    ("soccer", "por.1", "Primeira Liga"),
+    ("soccer", "por.taca.portugal", "Taça de Portugal"),
+    ("soccer", "por.taca.liga", "Taça da Liga"),
+    ("soccer", "por.super_cup", "Supertaça de Portugal"),
+    # ── Turquía ──
+    ("soccer", "tur.1", "Süper Lig"),
+    ("soccer", "tur.cup", "Copa de Turquía"),
+    ("soccer", "tur.super_cup", "Supercopa de Turquía"),
+    # ── Estados Unidos ──
+    ("soccer", "usa.1", "MLS"),
+    ("soccer", "usa.open", "U.S. Open Cup"),
+    # ── Arabia Saudí ──
+    ("soccer", "ksa.1", "Saudi Pro League"),
+    ("soccer", "ksa.kings.cup", "Copa del Rey de Arabia Saudí"),
+    ("soccer", "ksa.super_cup", "Supercopa de Arabia Saudí"),
     ("basketball", "nba", "NBA"),
     ("football", "nfl", "NFL"),
     ("football", "college-football", "NCAA Football"),
@@ -106,7 +155,16 @@ NO_ESPN = {"premiership-rugby", "6-nations", "super-rugby-pacific", "nations-cha
 OPTIONAL = {"uefa.europa.conf", "uefa.super_cup", "eng.2", "eng.fa", "eng.league_cup",
             "eng.charity", "esp.copa_del_rey", "esp.super_cup", "ger.dfb_pokal",
             "ger.super_cup", "ita.coppa_italia", "ita.super_cup", "fra.coupe_de_france",
-            "fra.super_cup", "col.copa", "conmebol.sudamericana", "fifa.cwc"}
+            "fra.super_cup", "col.copa", "conmebol.sudamericana", "fifa.cwc",
+            "uefa.champions_qual", "uefa.europa_qual", "uefa.europa.conf_qual",
+            "fifa.intercontinental_cup", "conmebol.recopa", "concacaf.champions",
+            "concacaf.leagues.cup", "concacaf.central.american.cup", "afc.champions",
+            "afc.cup", "caf.champions", "caf.confed", "arg.1", "arg.copa", "arg.supercopa",
+            "bra.1", "bra.2", "bra.copa_do_brazil", "bra.supercopa", "bra.camp.paulista",
+            "bra.camp.carioca", "bra.camp.mineiro", "bra.camp.gaucho", "mex.1", "mex.campeon",
+            "ned.1", "ned.cup", "ned.supercup", "por.1", "por.taca.portugal", "por.taca.liga",
+            "por.super_cup", "tur.1", "tur.cup", "tur.super_cup", "usa.1", "usa.open",
+            "ksa.1", "ksa.kings.cup", "ksa.super_cup"}
 
 KEEP_PAST = 10     # últimos partidos jugados por equipo/jugador (solo de la temporada actual)
 KEEP_NEXT = 1      # próximos partidos por jugar por equipo/jugador
@@ -986,13 +1044,18 @@ PERSIST = [c.name for c in events.columns]
 class Ledger:
     """Partidos de una liga en memoria: fusiona lo que entregan varias fuentes."""
 
-    def __init__(self, sport, league, league_name):
+    def __init__(self, sport, league, league_name, since=None):
         self.sport, self.league, self.league_name = sport, league, league_name
         self.rows, self.by_src, self.block = {}, {}, defaultdict(set)
         self.dirty, self.used = set(), set()
+        # since (AAAA-MM-DD): en pasadas ligeras solo se cargan los partidos cercanos a la
+        # ventana consultada, para no descargar toda la tabla de la base en cada ejecución
+        cond = [events.c.sport == sport, events.c.league == league]
+        if since:
+            cond.append(or_(events.c.start_time >= since, events.c.start_time.is_(None)))
         with engine.connect() as c:
-            for r in c.execute(select(events).where(
-                    events.c.sport == sport, events.c.league == league)).mappings():
+            cols = [col for col in events.columns if col.name != "raw"]   # "raw" pesa mucho y no se usa
+            for r in c.execute(select(*cols).where(*cond)).mappings():
                 self._add(dict(r))
 
     # -- índice --
@@ -1076,7 +1139,7 @@ class Ledger:
                  detail=inc.get("detail"), sources=prov.name,
                  src_ids=json.dumps({"ids": {prov.name: str(inc["src_id"])}, "flip": []}),
                  name_prio=prov.prio,
-                 raw=json.dumps(inc.get("raw"), ensure_ascii=False) if inc.get("raw") is not None else None,
+                 raw=None,   # ya no se guarda el JSON crudo de la fuente (nadie lo lee y pesaba ~80% de la fila)
                  fetched_at=utcnow().replace(tzinfo=None))
         self._add(r)
         self.used.add((prov.name, eid))
@@ -1100,8 +1163,6 @@ class Ledger:
             know(self.sport, inc["away"], prov.prio)
             if inc.get("start_time"):
                 cur["start_time"] = inc["start_time"]
-            if inc.get("raw") is not None:
-                cur["raw"] = json.dumps(inc["raw"], ensure_ascii=False)
             cur["name_prio"] = prov.prio
             for k in self._keys(cur):
                 self.block[k].add(cur["event_id"])
@@ -1272,11 +1333,16 @@ def run_sync(deep=False):
 
     stats = {p.name: dict(ok=0, fail=0, rows=0, err="") for p in PROVIDERS}
     dead, t0 = set(), time.monotonic()
-    for sport, league, name in LEAGUES:
+    order = LEAGUES
+    if deep:
+        order = sorted(LEAGUES, key=lambda L: have.get((L[0], L[1]), 0) >= 25)   # vacías primero
+    for sport, league, name in order:
         if time.monotonic() - t0 > RUN_BUDGET:
             log.warning("Presupuesto de tiempo agotado: omito %s y las ligas siguientes", name)
             break
-        ledger = Ledger(sport, league, name)
+        tol = TOL_DAYS.get(sport, DEFAULT_TOL)
+        ledger = Ledger(sport, league, name,
+                        since=None if deep else (today - dt.timedelta(LIVE_BACK + int(tol) + 3)).isoformat())
         primary_rows, primary_fail = 0, False
         if deep:
             # liga nueva o casi vacía: carga completa desde el inicio de la temporada
@@ -1341,7 +1407,8 @@ def run_sync(deep=False):
         now = utcnow().replace(tzinfo=None)
         upsert_table(health_t, [dict(source="_deep", label="pasada profunda", status="ok",
                                      last_ok=now, last_run=now, detail="")], ["source"])
-    prune()
+    if deep:
+        prune()    # la poda lee toda la tabla: se hace solo en la pasada profunda (diaria)
 
 
 def run_check():
@@ -1386,6 +1453,7 @@ def run_site(outdir):
     health.sort(key=lambda h: order.get(h["source"], 99))
     with open(os.path.join(outdir, "data.json"), "w", encoding="utf-8") as f:
         json.dump({"generated_at": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"), "events": rows,
+                   "leagues": [dict(sport=sp, league=lg, name=nm) for sp, lg, nm in LEAGUES],
                    "sources": health}, f, ensure_ascii=False, separators=(",", ":"))
     with open(os.path.join(outdir, "index.html"), "w", encoding="utf-8") as f:
         f.write(INDEX_HTML)
@@ -1517,7 +1585,7 @@ ul{list-style:none;margin:0;padding:0}
 <script>
 const SPORTS={soccer:"Fútbol",basketball:"Baloncesto",football:"Fútbol americano",baseball:"Béisbol",hockey:"Hockey sobre hielo",tennis:"Tenis",rugby:"Rugby"};
 const $=id=>document.getElementById(id);
-let DATA=[],S={sport:"",league:"",who:"",limit:30};
+let DATA=[],CATALOG=[],S={sport:"",league:"",who:"",limit:30};
 
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmt=iso=>{const d=new Date(iso);return isNaN(d)?"":d.toLocaleString("es",{weekday:"short",day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"})};
@@ -1572,8 +1640,10 @@ function fillControls(){
   $("sport").innerHTML=sports.map(k=>`<option value="${k}">${SPORTS[k]}</option>`).join("");
   if(!sports.includes(S.sport)) S.sport=sports[0]||"";
   $("sport").value=S.sport;
-  const leagues=new Map();sportEvents().forEach(e=>leagues.set(e.league,e.league_name));
-  $("league").innerHTML='<option value="">Todas las ligas</option>'+[...leagues].sort((a,b)=>a[1].localeCompare(b[1],"es")).map(([id,n])=>`<option value="${esc(id)}">${esc(n)}</option>`).join("");
+  const withData=new Set(sportEvents().map(e=>e.league));
+  const leagues=new Map();CATALOG.filter(l=>l.sport===S.sport).forEach(l=>leagues.set(l.league,l.name));
+  sportEvents().forEach(e=>leagues.set(e.league,e.league_name));
+  $("league").innerHTML='<option value="">Todas las ligas</option>'+[...leagues].sort((a,b)=>a[1].localeCompare(b[1],"es")).map(([id,n])=>`<option value="${esc(id)}">${esc(n)}${withData.has(id)?"":" (sin partidos recientes)"}</option>`).join("");
   if(S.league&&!leagues.has(S.league)) S.league="";
   $("league").value=S.league;
   $("whoLabel").textContent=S.sport==="tennis"?"Jugador":"Equipo";
@@ -1602,6 +1672,7 @@ function render(){
       +'<p class="note">Incluye todas las competiciones en las que participa. G = ganó, E = empató, P = perdió.</p>';
   }else{
     const ev=leagueEvents();
+    if(!ev.length){v.innerHTML='<div class="card empty">Esta competición no tiene partidos recientes ni próximos guardados (fuera de temporada, o todavía sin datos).</div>';return}
     const live=ev.filter(e=>e.state==="in").sort(byStart);
     const next=ev.filter(e=>e.state==="pre").sort(byStart);
     const past=ev.filter(e=>e.state==="post").sort(byStart).reverse();
@@ -1624,7 +1695,7 @@ document.addEventListener("click",e=>{
 });
 
 fetch("data.json?"+Date.now()).then(r=>r.json()).then(j=>{
-  DATA=j.events||[];renderSources(j.sources);
+  DATA=j.events||[];CATALOG=j.leagues||[];renderSources(j.sources);
   const age=(Date.now()-utc(j.generated_at))/60000;
   const u=$("updated");
   u.textContent="Actualizado "+utc(j.generated_at).toLocaleString("es",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"})+
