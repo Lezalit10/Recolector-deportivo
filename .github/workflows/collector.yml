@@ -16,6 +16,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  actions: write   # para el paso de mantener activo el cron
 
 concurrency:
   group: collector
@@ -66,3 +67,12 @@ jobs:
       - id: deploy
         if: ${{ inputs.mode != 'check' }}
         uses: actions/deploy-pages@v4
+
+      # Los repos públicos pierden sus tareas programadas tras 60 días sin actividad.
+      # Este paso intenta reactivar el workflow en cada ejecución (sin garantía).
+      - name: Mantener activo el cron
+        if: ${{ inputs.mode != 'check' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow enable collector.yml --repo "${{ github.repository }}"
