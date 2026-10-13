@@ -42,6 +42,7 @@ import re
 import time
 import unicodedata
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 
 import requests
@@ -75,12 +76,13 @@ LEAGUES = [
     ("hockey", "nhl", "NHL"),
     ("tennis", "atp", "ATP"),
     ("tennis", "wta", "WTA"),
-    ("rugby", "six-nations", "Six Nations"),
-    ("rugby", "super-rugby", "Super Rugby"),
-    ("rugby", "rugby-championship", "The Rugby Championship"),
+    ("rugby", "premiership-rugby", "Premiership Rugby"),
+    ("rugby", "6-nations", "Six Nations"),
+    ("rugby", "super-rugby-pacific", "Super Rugby Pacific"),
+    ("rugby", "nations-championship", "Nations Championship"),
 ]
 # Ligas que ESPN no cubre con este identificador (solo las sirven otras fuentes)
-NO_ESPN = {"six-nations", "super-rugby", "rugby-championship"}
+NO_ESPN = {"premiership-rugby", "6-nations", "super-rugby-pacific", "nations-championship"}
 
 KEEP_PAST = 10     # últimos partidos jugados por equipo/jugador
 KEEP_NEXT = 1      # próximos partidos por jugar por equipo/jugador
@@ -89,6 +91,8 @@ DEEP_BACK = int(os.environ.get("DEEP_BACK", 120))
 DEEP_FWD = int(os.environ.get("DEEP_FWD", 30))
 DEEP_CHUNK = 7     # días por consulta de ESPN en la pasada profunda
 SLEEP = 0.3        # pausa de cortesía entre consultas de ESPN (s)
+ESPN_DAY_BACK = int(os.environ.get("ESPN_DAY_BACK", 60))   # modo por días: días hacia atrás
+DEEP_EVERY_HOURS = int(os.environ.get("DEEP_EVERY_HOURS", 26))  # cada cuánto se fuerza la pasada profunda
 RUN_BUDGET = 28 * 60   # segundos máximos de recolección por pasada (el job de GitHub dura 40 min)
 NOT_PLAYED = ("postponed", "cancel", "suspended", "abandon", "ppd", "aplaz")
 TOL_DAYS = {"tennis": 16.0}          # tolerancia de fecha al cruzar fuentes
@@ -491,7 +495,33 @@ class ESPN(Provider):
                     raw=comp))
         return rows
 
+    day_mode = set()     # deportes en los que ESPN rechaza rangos de fechas (HTTP 400)
+
+    def _fetch_days(self, sport, league, start, end, deep):
+        """Una consulta por día (en paralelo). ESPN rechaza los rangos en estos deportes."""
+        if deep:
+            start = max(start, end - dt.timedelta(days=ESPN_DAY_BACK + 30))
+        days = [start + dt.timedelta(n) for n in range((end - start).days + 1)]
+
+        def one(day):
+            time.sleep(0.1)
+            return self._query(sport, league, day.strftime("%Y%m%d"))
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            results = list(pool.map(one, days))
+        rows, ok, last = [], 0, None
+        for status, data in results:
+            if status == 200:
+                ok += 1
+                rows += self.parse(data, sport)
+            else:
+                last = status
+        if ok == 0:
+            raise SourceError(f"ESPN {league}: HTTP {last}")
+        return rows
+
     def fetch(self, sport, league, name, start, end, deep):
+        if sport in self.day_mode:
+            return self._fetch_days(sport, league, start, end, deep)
         chunk = DEEP_CHUNK if deep else (end - start).days + 1
         rows, ok, fail, last = [], 0, 0, None
         d = start
@@ -505,6 +535,13 @@ class ESPN(Provider):
             else:
                 fail += 1
                 last = status
+                if ok == 0 and status == 400 and d != e:
+                    # ¿rechaza solo los rangos? probar un día suelto
+                    s1, d1 = self._query(sport, league, start.strftime("%Y%m%d"))
+                    if s1 == 200:
+                        log.warning("ESPN rechaza rangos de fechas en '%s': paso a consultas por día", sport)
+                        self.day_mode.add(sport)
+                        return self._fetch_days(sport, league, start, end, deep)
                 if ok == 0 and fail >= 2:     # la fuente no responde: no gastar el resto
                     raise SourceError(f"ESPN {league}: HTTP {last}")
             d = e + dt.timedelta(days=1)
@@ -645,6 +682,7 @@ class NHL(Provider):
 # ---- NBA CDN (oficial) ----------------------------------------
 class NBA(Provider):
     name, label, prio = "nba", "NBA CDN", 2
+    backup = True        # devuelve HTTP 403 desde los servidores de GitHub
     leagues = {"nba"}
     URL = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json"
 
@@ -809,7 +847,7 @@ class Sackmann(Provider):
                     detail=detail or None, raw={k: r.get(k) for k in (
                         "tourney_id", "tourney_name", "round", "winner_name", "loser_name", "score")}))
         if not got:
-            raise SourceError(f"Sackmann {league}: archivo no disponible")
+            log.info("Sackmann %s: aún no hay archivo del año en curso (se publica con retraso)", league)
         return rows
 
 
@@ -821,12 +859,15 @@ class FixtureDownload(Provider):
                "ger.1": ("bundesliga", False), "fra.1": ("ligue-1", False),
                "uefa.champions": ("champions-league", False), "uefa.europa": ("europa-league", False),
                "nfl": ("nfl", False), "nba": ("nba", False), "nhl": ("nhl", False),
-               "six-nations": ("six-nations", True), "super-rugby": ("super-rugby", True),
-               "rugby-championship": ("rugby-championship", True)}
+               "premiership-rugby": ("premiership-rugby", False), "6-nations": ("6-nations", True),
+               "super-rugby-pacific": ("super-rugby-pacific", True),
+               "nations-championship": ("nations-championship", True)}
     PLACEHOLDER = re.compile(r"\b(tbc|tbd|to be|winner|loser|runner)\b|/", re.I)
 
     def fetch(self, sport, league, name, start, end, deep):
         slug, calendar = self.leagues[league]
+        if sport == "rugby":   # pocos partidos al año: mirar más atrás para reunir 10
+            start = start - dt.timedelta(days=420)
         season = lambda d: d.year if (calendar or d.month >= 7) else d.year - 1
         rows, got, last = [], False, None
         for y in sorted({season(start), season(end)}):
@@ -1157,9 +1198,9 @@ def run_sync(deep=False):
         total = conn.execute(select(func.count()).select_from(events)).scalar()
     with engine.connect() as conn:
         last_deep = conn.execute(select(health_t.c.last_run).where(health_t.c.source == "_deep")).scalar()
-    stale = last_deep is None or utcnow().replace(tzinfo=None) - last_deep > dt.timedelta(hours=26)
+    stale = last_deep is None or utcnow().replace(tzinfo=None) - last_deep > dt.timedelta(hours=DEEP_EVERY_HOURS)
     if total == 0 or stale:
-        deep = True  # primera ejecución, o ninguna pasada profunda en las últimas 26 h
+        deep = True  # primera ejecución, o ninguna pasada profunda reciente
     today = utcnow().date()
     if deep:
         start, end = today - dt.timedelta(DEEP_BACK), today + dt.timedelta(DEEP_FWD)
