@@ -1,0 +1,68 @@
+name: Recolector deportivo
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # pasada ligera cada 10 min
+    - cron: "17 8 * * *"     # pasada profunda diaria (todas las fuentes)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "normal = pasada ligera | deep = últimos 120 días | check = diagnóstico por fuente"
+        type: choice
+        options: [normal, deep, check]
+        default: normal
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: collector
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      FOOTBALL_DATA_TOKEN: ${{ secrets.FOOTBALL_DATA_TOKEN }}   # opcional (gratis)
+      SCHEDULE: ${{ github.event.schedule }}
+      MODE: ${{ inputs.mode }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Diagnóstico de fuentes
+        if: ${{ inputs.mode == 'check' }}
+        run: python collector.py check
+
+      - name: Recolectar, fusionar, podar y generar el sitio
+        if: ${{ inputs.mode != 'check' }}
+        run: |
+          if [ "$SCHEDULE" = "17 8 * * *" ] || [ "$MODE" = "deep" ]; then
+            python collector.py sync --deep
+          else
+            python collector.py sync
+          fi
+          python collector.py site --out site
+
+      - uses: actions/configure-pages@v5
+        if: ${{ inputs.mode != 'check' }}
+      - uses: actions/upload-pages-artifact@v3
+        if: ${{ inputs.mode != 'check' }}
+        with:
+          path: site
+      - id: deploy
+        if: ${{ inputs.mode != 'check' }}
+        uses: actions/deploy-pages@v4
