@@ -95,13 +95,10 @@ TOL_DAYS = {"tennis": 16.0}          # tolerancia de fecha al cruzar fuentes
 DEFAULT_TOL = 1.3
 STRONG, WEAK = 0.85, 0.25            # umbrales de parecido de nombres
 
-DB_URL = os.environ.get("DATABASE_URL", "sqlite:///sports.db")
-# Supabase/Heroku entregan "postgres://" o "postgresql://"; SQLAlchemy reciente usaría psycopg v3
-# por defecto, pero instalamos psycopg2: se fuerza ese driver sea cual sea el formato recibido.
-for _prefix in ("postgres://", "postgresql://", "postgresql+psycopg://"):
-    if DB_URL.startswith(_prefix):
-        DB_URL = "postgresql+psycopg2://" + DB_URL[len(_prefix):]
-        break
+DB_URL = (os.environ.get("DATABASE_URL") or "").strip() or "sqlite:///sports.db"
+# Cualquier variante de Postgres (postgres://, postgresql://, postgresql+psycopg://...)
+# se fuerza al controlador psycopg2, que es el que instala requirements.txt.
+DB_URL = re.sub(r"^postgres(ql)?(\+\w+)?://", "postgresql+psycopg2://", DB_URL)
 
 engine = create_engine(DB_URL, pool_pre_ping=True)
 meta = MetaData()
