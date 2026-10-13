@@ -19,7 +19,7 @@ Cada partido se FUSIONA entre fuentes aunque los nombres difieran
 siguen alimentando la base de datos. El estado de cada fuente se guarda
 y se muestra al pie de la interfaz.
 
-Por cada equipo/jugador se conservan SOLO sus últimos 10 partidos jugados y
+Por cada equipo/jugador se conservan SOLO sus últimos 20 partidos jugados y
 el próximo por jugar (más lo que esté en vivo).
 
 Comandos:
@@ -67,6 +67,23 @@ LEAGUES = [
     ("soccer", "col.1", "Liga BetPlay"),
     ("soccer", "uefa.champions", "Champions League"),
     ("soccer", "uefa.europa", "Europa League"),
+    ("soccer", "uefa.europa.conf", "Conference League"),
+    ("soccer", "uefa.super_cup", "Supercopa de la UEFA"),
+    ("soccer", "eng.2", "Championship (Inglaterra)"),
+    ("soccer", "eng.fa", "FA Cup"),
+    ("soccer", "eng.league_cup", "EFL Cup (Copa de la Liga)"),
+    ("soccer", "eng.charity", "Community Shield"),
+    ("soccer", "esp.copa_del_rey", "Copa del Rey"),
+    ("soccer", "esp.super_cup", "Supercopa de España"),
+    ("soccer", "ger.dfb_pokal", "DFB-Pokal"),
+    ("soccer", "ger.super_cup", "Supercopa de Alemania"),
+    ("soccer", "ita.coppa_italia", "Coppa Italia"),
+    ("soccer", "ita.super_cup", "Supercopa de Italia"),
+    ("soccer", "fra.coupe_de_france", "Copa de Francia"),
+    ("soccer", "fra.super_cup", "Supercopa de Francia"),
+    ("soccer", "col.copa", "Copa Colombia"),
+    ("soccer", "conmebol.sudamericana", "Copa Sudamericana"),
+    ("soccer", "fifa.cwc", "Mundial de Clubes"),
     ("soccer", "conmebol.libertadores", "Libertadores"),
     ("soccer", "fifa.world", "Mundial FIFA"),
     ("basketball", "nba", "NBA"),
@@ -84,14 +101,21 @@ LEAGUES = [
 # Ligas que ESPN no cubre con este identificador (solo las sirven otras fuentes)
 NO_ESPN = {"premiership-rugby", "6-nations", "super-rugby-pacific", "nations-championship"}
 
-KEEP_PAST = 10     # últimos partidos jugados por equipo/jugador
+# Competiciones cuyo identificador en ESPN no está verificado: si no existen, se
+# avisa en el registro pero NO se marca la fuente como "con fallos".
+OPTIONAL = {"uefa.europa.conf", "uefa.super_cup", "eng.2", "eng.fa", "eng.league_cup",
+            "eng.charity", "esp.copa_del_rey", "esp.super_cup", "ger.dfb_pokal",
+            "ger.super_cup", "ita.coppa_italia", "ita.super_cup", "fra.coupe_de_france",
+            "fra.super_cup", "col.copa", "conmebol.sudamericana", "fifa.cwc"}
+
+KEEP_PAST = 20     # últimos partidos jugados por equipo/jugador (solo de la temporada actual)
 KEEP_NEXT = 1      # próximos partidos por jugar por equipo/jugador
 LIVE_BACK, LIVE_FWD = 2, 2      # ventana de la pasada ligera (días)
-DEEP_BACK = int(os.environ.get("DEEP_BACK", 120))
+DEEP_BACK = int(os.environ.get("DEEP_BACK", 150))   # tope de días hacia atrás en la carga inicial de una liga
 DEEP_FWD = int(os.environ.get("DEEP_FWD", 30))
 DEEP_CHUNK = 7     # días por consulta de ESPN en la pasada profunda
 SLEEP = 0.3        # pausa de cortesía entre consultas de ESPN (s)
-ESPN_DAY_BACK = int(os.environ.get("ESPN_DAY_BACK", 60))   # modo por días: días hacia atrás
+ESPN_DAY_BACK = int(os.environ.get("ESPN_DAY_BACK", 120))   # modo por días: días hacia atrás
 DEEP_EVERY_HOURS = int(os.environ.get("DEEP_EVERY_HOURS", 26))  # cada cuánto se fuerza la pasada profunda
 RUN_BUDGET = 28 * 60   # segundos máximos de recolección por pasada (el job de GitHub dura 40 min)
 NOT_PLAYED = ("postponed", "cancel", "suspended", "abandon", "ppd", "aplaz")
@@ -502,6 +526,9 @@ class ESPN(Provider):
         if deep:
             start = max(start, end - dt.timedelta(days=ESPN_DAY_BACK + 30))
         days = [start + dt.timedelta(n) for n in range((end - start).days + 1)]
+        probe, _ = self._query(sport, league, end.strftime("%Y%m%d"))
+        if probe == 404:       # la competición no existe con ese identificador: no gastar cientos de consultas
+            raise SourceError(f"ESPN {league}: HTTP 404 (identificador no válido)")
 
         def one(day):
             time.sleep(0.1)
@@ -557,7 +584,7 @@ class FootballData(Provider):
     backup = True
     min_interval = 6.5          # plan gratis: 10 llamadas por minuto
     leagues = {"eng.1": "PL", "esp.1": "PD", "ger.1": "BL1", "ita.1": "SA",
-               "fra.1": "FL1", "uefa.champions": "CL", "fifa.world": "WC"}
+               "fra.1": "FL1", "uefa.champions": "CL", "fifa.world": "WC", "eng.2": "ELC"}
 
     def enabled(self):
         return bool(os.environ.get("FOOTBALL_DATA_TOKEN"))
@@ -858,6 +885,7 @@ class FixtureDownload(Provider):
     leagues = {"eng.1": ("epl", False), "esp.1": ("la-liga", False), "ita.1": ("serie-a", False),
                "ger.1": ("bundesliga", False), "fra.1": ("ligue-1", False),
                "uefa.champions": ("champions-league", False), "uefa.europa": ("europa-league", False),
+               "uefa.europa.conf": ("conference-league", False), "eng.2": ("championship", False),
                "nfl": ("nfl", False), "nba": ("nba", False), "nhl": ("nhl", False),
                "premiership-rugby": ("premiership-rugby", False), "6-nations": ("6-nations", True),
                "super-rugby-pacific": ("super-rugby-pacific", True),
@@ -866,8 +894,6 @@ class FixtureDownload(Provider):
 
     def fetch(self, sport, league, name, start, end, deep):
         slug, calendar = self.leagues[league]
-        if sport == "rugby":   # pocos partidos al año: mirar más atrás para reunir 10
-            start = start - dt.timedelta(days=420)
         season = lambda d: d.year if (calendar or d.month >= 7) else d.year - 1
         rows, got, last = [], False, None
         for y in sorted({season(start), season(end)}):
@@ -948,7 +974,7 @@ class OpenLigaDB(Provider):
         return rows
 
 
-PROVIDERS = sorted([ESPN(), MLB(), NHL(), NBA(), FootballData(), FixtureDownload(), OpenLigaDB(),
+PROVIDERS = sorted([ESPN(), MLB(), NHL(), FootballData(), FixtureDownload(), OpenLigaDB(),
                     NFLverse(), OpenFootball(), Sackmann()], key=lambda p: p.prio)
 
 # ─────────────────── fusión de fuentes por liga ────────────────
@@ -1131,9 +1157,39 @@ def load_aliases():
             ALIASES[(r.sport, r.alias)] = r.canonical
 
 
+# ───────────────────── temporada actual ────────────────────────
+def season_start(sport, league, today=None):
+    """Primer día de la temporada en curso para esa liga (los partidos anteriores se descartan)."""
+    today = today or utcnow().date()
+    y = today.year
+
+    def from_month(m):   # temporadas que arrancan en el mes m y cruzan el año
+        return dt.date(y if today.month >= m else y - 1, m, 1)
+    if sport == "soccer":
+        if league.startswith(("col.", "conmebol.", "fifa.")):
+            return dt.date(y, 1, 1)             # calendario anual
+        return from_month(7)                    # ligas y copas europeas
+    if sport == "basketball":
+        return from_month(8)
+    if sport == "football":
+        return from_month(8)                    # incluye pretemporada
+    if sport == "hockey":
+        return from_month(9)
+    if sport == "rugby":
+        return from_month(8) if league == "premiership-rugby" else dt.date(y, 1, 1)
+    return dt.date(y, 1, 1)                     # tenis, béisbol
+
+
+def in_season(sport, league, start_time):
+    st = parse_iso(start_time)
+    if not st:
+        return True
+    return st.date() >= season_start(sport, league)
+
+
 # ─────────────────────────── poda ──────────────────────────────
 def prune():
-    """Deja por equipo/jugador sus últimos KEEP_PAST jugados y KEEP_NEXT por jugar."""
+    """Deja por equipo/jugador sus últimos KEEP_PAST jugados (solo temporada actual) y KEEP_NEXT por jugar."""
     with engine.connect() as conn:
         rows = conn.execute(select(
             events.c.sport, events.c.league, events.c.event_id, events.c.home,
@@ -1147,6 +1203,8 @@ def prune():
             if not st or st > utcnow() - dt.timedelta(hours=12):
                 keep.add(key)
         elif r.state == "post" and not any(b in status for b in NOT_PLAYED):
+            if not in_season(r.sport, r.league, r.start_time):
+                continue                       # de una temporada anterior: se descarta
             for p in (r.home, r.away):
                 past[(r.sport, p)].append((r.start_time or "", key))
         elif r.state == "pre":
@@ -1203,10 +1261,14 @@ def run_sync(deep=False):
         deep = True  # primera ejecución, o ninguna pasada profunda reciente
     today = utcnow().date()
     if deep:
-        start, end = today - dt.timedelta(DEEP_BACK), today + dt.timedelta(DEEP_FWD)
+        end = today + dt.timedelta(DEEP_FWD)
     else:
-        start, end = today - dt.timedelta(LIVE_BACK), today + dt.timedelta(LIVE_FWD)
-    log.info("Sync %s: %s .. %s", "PROFUNDO" if deep else "ligero", start, end)
+        end = today + dt.timedelta(LIVE_FWD)
+    with engine.connect() as conn:
+        have = {(r.sport, r.league): r.n for r in conn.execute(
+            select(events.c.sport, events.c.league, func.count().label("n"))
+            .where(events.c.state == "post").group_by(events.c.sport, events.c.league))}
+    log.info("Sync %s (hasta %s)", "PROFUNDO" if deep else "ligero", end)
 
     stats = {p.name: dict(ok=0, fail=0, rows=0, err="") for p in PROVIDERS}
     dead, t0 = set(), time.monotonic()
@@ -1216,6 +1278,16 @@ def run_sync(deep=False):
             break
         ledger = Ledger(sport, league, name)
         primary_rows, primary_fail = 0, False
+        if deep:
+            # liga nueva o casi vacía: carga completa desde el inicio de la temporada
+            # (con tope DEEP_BACK); liga ya poblada: solo las últimas 3 semanas
+            if have.get((sport, league), 0) < 25:
+                start = max(season_start(sport, league), today - dt.timedelta(DEEP_BACK))
+            else:
+                start = today - dt.timedelta(21)
+        else:
+            start = today - dt.timedelta(LIVE_BACK)
+        log.info("%s: ventana %s .. %s", name, start, end)
         for p in PROVIDERS:
             if not p.supports(league):
                 continue
@@ -1228,6 +1300,9 @@ def run_sync(deep=False):
             try:
                 got = p.fetch(sport, league, name, start, end, deep)
             except Exception as e:  # noqa: BLE001 - una fuente caída no debe frenar a las demás
+                if league in OPTIONAL:
+                    log.warning("[%s] %s (opcional) no disponible: %s", p.name, name, e)
+                    continue
                 stats[p.name]["fail"] += 1
                 stats[p.name]["err"] = f"{league}: {e}"[:200]
                 log.warning("[%s] %s FALLÓ: %s", p.name, name, e)
@@ -1307,6 +1382,7 @@ def run_site(outdir):
                        last_ok=r.last_ok.strftime("%Y-%m-%dT%H:%M:%SZ") if r.last_ok else None,
                        detail=r.detail) for r in conn.execute(select(health_t)) if not r.source.startswith("_")]
     order = {p.name: i for i, p in enumerate(PROVIDERS)}
+    health = [h for h in health if h["source"] in order]   # oculta fuentes retiradas (p. ej. NBA CDN)
     health.sort(key=lambda h: order.get(h["source"], 99))
     with open(os.path.join(outdir, "data.json"), "w", encoding="utf-8") as f:
         json.dump({"generated_at": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"), "events": rows,
@@ -1514,7 +1590,7 @@ function render(){
     const mine=sportEvents().filter(e=>e.home===S.who||e.away===S.who);
     const live=mine.filter(e=>e.state==="in").sort(byStart);
     const next=mine.filter(e=>e.state==="pre").sort(byStart).slice(0,1);
-    const past=mine.filter(e=>e.state==="post").sort(byStart).reverse().slice(0,10);
+    const past=mine.filter(e=>e.state==="post").sort(byStart).reverse().slice(0,20);
     const res=past.map(e=>outcome(e,S.who));
     const cnt=k=>res.filter(r=>r===k).length;
     const formChips=past.slice(0,5).reverse().map(e=>{const o=outcome(e,S.who);return `<span class="chip ${o}">${o==="N"?"–":o}</span>`}).join("");
@@ -1522,7 +1598,7 @@ function render(){
     v.innerHTML=`<div class="card hero"><div><h3>${esc(S.who)}</h3><div class="sub">${SPORTS[S.sport]||""} · ${esc(leagues)}</div></div>
       <div><div class="form" title="Últimos 5, el más reciente a la derecha">${formChips}</div>
       <div class="summary">Últimos ${past.length}: ${cnt("G")} G · ${cnt("E")} E · ${cnt("P")} P</div></div></div>`
-      +section("En vivo",live,S.who)+section("Próximo partido",next,S.who)+section("Últimos 10 partidos",past,S.who)
+      +section("En vivo",live,S.who)+section("Próximo partido",next,S.who)+section("Últimos 20 partidos",past,S.who)
       +'<p class="note">Incluye todas las competiciones en las que participa. G = ganó, E = empató, P = perdió.</p>';
   }else{
     const ev=leagueEvents();
@@ -1533,7 +1609,7 @@ function render(){
     v.innerHTML=section("En vivo",live,"")
       +section("Próximos partidos",next.slice(0,S.limit),"",more(next))
       +section("Resultados recientes",past.slice(0,S.limit),"",more(past))
-      +'<p class="note">Haz clic en un equipo o jugador para ver sus últimos 10 partidos y el próximo.</p>';
+      +'<p class="note">Haz clic en un equipo o jugador para ver sus últimos 20 partidos y el próximo.</p>';
   }
 }
 
