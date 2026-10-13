@@ -179,7 +179,10 @@ RUN_BUDGET = 28 * 60   # segundos máximos de recolección por pasada (el job de
 NOT_PLAYED = ("postponed", "cancel", "suspended", "abandon", "ppd", "aplaz")
 TOL_DAYS = {"tennis": 16.0}          # tolerancia de fecha al cruzar fuentes
 DEFAULT_TOL = 1.3
-STRONG, WEAK = 0.85, 0.25            # umbrales de parecido de nombres
+STRONG, WEAK = 0.85, 0.45            # umbrales de parecido de nombres
+SAME_SLOT = 0.13                     # días (~3 h): un equipo no juega dos partidos a la vez
+DATA_VERSION = 9                     # al subir este número se vacían partidos y alias (datos mal fusionados)
+CONFLICT_SPORTS = ("soccer", "rugby", "football")   # deportes donde un equipo no juega dos veces en 20 h
 
 DB_URL = (os.environ.get("DATABASE_URL") or "").strip() or "sqlite:///sports.db"
 # Cualquier variante de Postgres (postgres://, postgresql://, postgresql+psycopg://...)
@@ -371,6 +374,7 @@ def learn(sport, alias_name, canonical):
     if not na or na == norm(canonical, sport) or ALIASES.get((sport, na)) == canonical:
         return
     ALIASES[(sport, na)] = canonical
+    log.info("Alias aprendido: '%s' -> '%s'", alias_name, canonical)
     NEW_ALIASES.append(dict(sport=sport, alias=na, canonical=canonical))
 
 
@@ -400,7 +404,7 @@ def day_diff(a, b):
     return abs((da - db).total_seconds()) / 86400.0
 
 
-def pair_score(inc, ex, sport):
+def pair_score(inc, ex, sport, dd=None):
     f = (lambda a, b: tsim(a, b)) if sport == "tennis" else sim
     nh, na = norm(inc["home"], sport), norm(inc["away"], sport)
     eh, ea = norm(ex["home"], sport), norm(ex["away"], sport)
@@ -410,7 +414,10 @@ def pair_score(inc, ex, sport):
     if sport == "tennis":
         ok = min(parts) >= STRONG
     else:
-        ok = (max(parts) >= STRONG and min(parts) >= WEAK) or sum(parts) >= 1.5
+        ok = ((max(parts) >= STRONG and min(parts) >= WEAK)
+              or (sum(parts) >= 1.5 and min(parts) >= WEAK)
+              # mismo equipo a la misma hora: es el mismo partido aunque el rival se escriba muy distinto
+              or (dd is not None and dd <= SAME_SLOT and max(parts) >= STRONG and min(parts) >= 0.25))
     return ok, sum(parts), swapped, parts
 
 
@@ -1095,7 +1102,7 @@ class Ledger:
             dd = day_diff(inc.get("start_time"), ex.get("start_time"))
             if dd is not None and dd > tol:
                 continue
-            ok, total, swapped, parts = pair_score(inc, ex, self.sport)
+            ok, total, swapped, parts = pair_score(inc, ex, self.sport, dd)
             if not ok:
                 continue
             score = (total, -(dd or 0))
@@ -1127,6 +1134,56 @@ class Ledger:
             inc = flip(inc)
         self.used.add((prov.name, key))
         self._update(self.rows[key], inc, prov, swapped)
+
+    def _safe_learn(self, alias_name, canonical, cur):
+        """Aprende un alias solo si es plausible: nombres parecidos y que el alias no sea otro
+        equipo que juega por las mismas fechas en esta misma competición."""
+        na, nc = norm(alias_name, self.sport), norm(canonical, self.sport)
+        if not na or na == nc:
+            return
+        if self.sport != "tennis" and sim(na, nc) < 0.25:
+            return
+        for k in self._candidates(cur):
+            if k == cur["event_id"]:
+                continue
+            o = self.rows[k]
+            if na in (norm(o["home"], self.sport), norm(o["away"], self.sport)):
+                return    # es un equipo distinto que juega cerca de esa fecha: no es un alias
+        learn(self.sport, alias_name, canonical)
+
+    def _resolve_conflicts(self):
+        """Un equipo no puede jugar dos partidos con menos de 20 h de diferencia: si hay dos,
+        casi seguro uno es una fusión errónea. Se conserva el mejor respaldado y se borra el otro."""
+        if self.sport not in CONFLICT_SPORTS:
+            return []
+        by_team = defaultdict(list)
+        for eid, r in self.rows.items():
+            t = parse_iso(r.get("start_time"))
+            if t:
+                for p in (r["home"], r["away"]):
+                    by_team[norm(p, self.sport)].append((t, eid))
+        dropped = []
+        for team, lst in by_team.items():
+            lst.sort()
+            for (t1, e1), (t2, e2) in zip(lst, lst[1:]):
+                if e1 in dropped or e2 in dropped or e1 == e2:
+                    continue
+                if (t2 - t1).total_seconds() >= 20 * 3600:
+                    continue
+                a, b = self.rows[e1], self.rows[e2]
+                rank = lambda r: (len((r.get("sources") or "").split(",")),
+                                  1 if r.get("home_score") not in (None, "") else 0,
+                                  -(r.get("name_prio") or 9))
+                loser = e2 if rank(a) >= rank(b) else e1
+                w, l = (a, b) if loser == e2 else (b, a)
+                log.warning("CONFLICTO en %s: '%s vs %s' [%s] y '%s vs %s' [%s]: descarto el segundo",
+                            self.league_name, w["home"], w["away"], w.get("sources"),
+                            l["home"], l["away"], l.get("sources"))
+                dropped.append(loser)
+        for e in dropped:
+            self.rows.pop(e, None)
+            self.dirty.discard(e)
+        return dropped
 
     def _create(self, inc, prov):
         eid = f"{prov.name}:{inc['src_id']}"
@@ -1166,7 +1223,7 @@ class Ledger:
                     cur[f] = inc[f]
         if prov.prio < cur["name_prio"]:   # la fuente nueva manda en nombres/hora/raw
             for old, new in ((cur["home"], inc["home"]), (cur["away"], inc["away"])):
-                learn(self.sport, old, new)
+                self._safe_learn(old, new, cur)
             cur["home"], cur["away"] = inc["home"], inc["away"]
             know(self.sport, inc["home"], prov.prio)
             know(self.sport, inc["away"], prov.prio)
@@ -1176,8 +1233,8 @@ class Ledger:
             for k in self._keys(cur):
                 self.block[k].add(cur["event_id"])
         else:   # aprende alias: el nombre de la fuente débil apunta al de la principal
-            learn(self.sport, inc["home"], cur["home"])
-            learn(self.sport, inc["away"], cur["away"])
+            self._safe_learn(inc["home"], cur["home"], cur)
+            self._safe_learn(inc["away"], cur["away"], cur)
             if not cur.get("start_time") and inc.get("start_time"):
                 cur["start_time"] = inc["start_time"]
         cur["_ids"][prov.name] = str(inc["src_id"])
@@ -1193,6 +1250,12 @@ class Ledger:
             self.dirty.add(cur["event_id"])
 
     def save(self):
+        dropped = self._resolve_conflicts()
+        if dropped:
+            with engine.begin() as conn:
+                conn.execute(delete(events).where(
+                    events.c.sport == self.sport, events.c.league == self.league,
+                    events.c.event_id.in_(dropped)))
         rows = [{k: self.rows[e].get(k) for k in PERSIST} for e in self.dirty]
         upsert_table(events, rows, ["sport", "league", "event_id"])
         return len(rows)
@@ -1319,8 +1382,24 @@ def save_health(stats):
     upsert_table(health_t, rows, ["source"])
 
 
+def check_data_version():
+    """Si el algoritmo de fusión cambió, vacía partidos y alias (podían estar mal fusionados)."""
+    with engine.connect() as c:
+        cur = c.execute(select(health_t.c.detail).where(health_t.c.source == "_ver")).scalar()
+    if cur == str(DATA_VERSION):
+        return
+    log.warning("Versión de datos %s -> %s: se vacían partidos y alias para recalcularlos limpios", cur, DATA_VERSION)
+    with engine.begin() as c:
+        c.execute(delete(events))
+        c.execute(delete(aliases_t))
+        c.execute(delete(health_t).where(health_t.c.source == "_deep"))
+    upsert_table(health_t, [dict(source="_ver", label="", status="ok", last_ok=None,
+                                 last_run=utcnow().replace(tzinfo=None), detail=str(DATA_VERSION))], ["source"])
+
+
 def run_sync(deep=False):
     ensure_schema()
+    check_data_version()
     load_aliases()
     with engine.connect() as conn:
         total = conn.execute(select(func.count()).select_from(events)).scalar()
