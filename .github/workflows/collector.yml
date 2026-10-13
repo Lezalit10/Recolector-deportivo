@@ -2,7 +2,6 @@ name: Recolector deportivo
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # pasada ligera cada 10 min
     - cron: "17 8 * * *"     # pasada profunda diaria (todas las fuentes)
   workflow_dispatch:
     inputs:
