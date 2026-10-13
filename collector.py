@@ -96,8 +96,12 @@ DEFAULT_TOL = 1.3
 STRONG, WEAK = 0.85, 0.25            # umbrales de parecido de nombres
 
 DB_URL = os.environ.get("DATABASE_URL", "sqlite:///sports.db")
-if DB_URL.startswith("postgres://"):  # SQLAlchemy exige "postgresql://"
-    DB_URL = DB_URL.replace("postgres://", "postgresql://", 1)
+# Supabase/Heroku entregan "postgres://" o "postgresql://"; SQLAlchemy reciente usaría psycopg v3
+# por defecto, pero instalamos psycopg2: se fuerza ese driver sea cual sea el formato recibido.
+for _prefix in ("postgres://", "postgresql://", "postgresql+psycopg://"):
+    if DB_URL.startswith(_prefix):
+        DB_URL = "postgresql+psycopg2://" + DB_URL[len(_prefix):]
+        break
 
 engine = create_engine(DB_URL, pool_pre_ping=True)
 meta = MetaData()
