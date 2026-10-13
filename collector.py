@@ -19,7 +19,7 @@ Cada partido se FUSIONA entre fuentes aunque los nombres difieran
 siguen alimentando la base de datos. El estado de cada fuente se guarda
 y se muestra al pie de la interfaz.
 
-Por cada equipo/jugador se conservan SOLO sus últimos 20 partidos jugados y
+Por cada equipo/jugador se conservan SOLO sus últimos 10 partidos jugados y
 el próximo por jugar (más lo que esté en vivo).
 
 Comandos:
@@ -108,7 +108,7 @@ OPTIONAL = {"uefa.europa.conf", "uefa.super_cup", "eng.2", "eng.fa", "eng.league
             "ger.super_cup", "ita.coppa_italia", "ita.super_cup", "fra.coupe_de_france",
             "fra.super_cup", "col.copa", "conmebol.sudamericana", "fifa.cwc"}
 
-KEEP_PAST = 20     # últimos partidos jugados por equipo/jugador (solo de la temporada actual)
+KEEP_PAST = 10     # últimos partidos jugados por equipo/jugador (solo de la temporada actual)
 KEEP_NEXT = 1      # próximos partidos por jugar por equipo/jugador
 LIVE_BACK, LIVE_FWD = 2, 2      # ventana de la pasada ligera (días)
 DEEP_BACK = int(os.environ.get("DEEP_BACK", 150))   # tope de días hacia atrás en la carga inicial de una liga
@@ -1590,7 +1590,7 @@ function render(){
     const mine=sportEvents().filter(e=>e.home===S.who||e.away===S.who);
     const live=mine.filter(e=>e.state==="in").sort(byStart);
     const next=mine.filter(e=>e.state==="pre").sort(byStart).slice(0,1);
-    const past=mine.filter(e=>e.state==="post").sort(byStart).reverse().slice(0,20);
+    const past=mine.filter(e=>e.state==="post").sort(byStart).reverse().slice(0,10);
     const res=past.map(e=>outcome(e,S.who));
     const cnt=k=>res.filter(r=>r===k).length;
     const formChips=past.slice(0,5).reverse().map(e=>{const o=outcome(e,S.who);return `<span class="chip ${o}">${o==="N"?"–":o}</span>`}).join("");
@@ -1598,7 +1598,7 @@ function render(){
     v.innerHTML=`<div class="card hero"><div><h3>${esc(S.who)}</h3><div class="sub">${SPORTS[S.sport]||""} · ${esc(leagues)}</div></div>
       <div><div class="form" title="Últimos 5, el más reciente a la derecha">${formChips}</div>
       <div class="summary">Últimos ${past.length}: ${cnt("G")} G · ${cnt("E")} E · ${cnt("P")} P</div></div></div>`
-      +section("En vivo",live,S.who)+section("Próximo partido",next,S.who)+section("Últimos 20 partidos",past,S.who)
+      +section("En vivo",live,S.who)+section("Próximo partido",next,S.who)+section("Últimos 10 partidos",past,S.who)
       +'<p class="note">Incluye todas las competiciones en las que participa. G = ganó, E = empató, P = perdió.</p>';
   }else{
     const ev=leagueEvents();
@@ -1609,7 +1609,7 @@ function render(){
     v.innerHTML=section("En vivo",live,"")
       +section("Próximos partidos",next.slice(0,S.limit),"",more(next))
       +section("Resultados recientes",past.slice(0,S.limit),"",more(past))
-      +'<p class="note">Haz clic en un equipo o jugador para ver sus últimos 20 partidos y el próximo.</p>';
+      +'<p class="note">Haz clic en un equipo o jugador para ver sus últimos 10 partidos y el próximo.</p>';
   }
 }
 
