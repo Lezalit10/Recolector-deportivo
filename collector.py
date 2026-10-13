@@ -1148,8 +1148,17 @@ class Ledger:
     def _update(self, cur, inc, prov, swapped):
         before = {k: cur.get(k) for k in PERSIST}
         ir, cr = RANK.get(inc["state"], 0), RANK.get(cur["state"], 0)
+        # Una fuente puede corregir un resultado ya guardado (mismo estado) solo si es de mayor
+        # prioridad que la que fijó los datos, o si es la misma fuente corrigiéndose a sí misma.
+        trusted = (prov.prio < cur["name_prio"]
+                   or (prov.prio == cur["name_prio"] and prov.name in cur["_ids"]))
+        has_score = (inc.get("home_score") not in (None, "")
+                     and inc.get("away_score") not in (None, ""))
         if ir > cr:
             for f in RESULT_FIELDS:
+                cur[f] = inc.get(f)
+        elif ir == cr and trusted and has_score:
+            for f in RESULT_FIELDS:      # corrección (o marcador en vivo actualizado)
                 cur[f] = inc.get(f)
         else:
             for f in RESULT_FIELDS:
@@ -1326,9 +1335,12 @@ def run_sync(deep=False):
     else:
         end = today + dt.timedelta(LIVE_FWD)
     with engine.connect() as conn:
-        have = {(r.sport, r.league): r.n for r in conn.execute(
-            select(events.c.sport, events.c.league, func.count().label("n"))
-            .where(events.c.state == "post").group_by(events.c.sport, events.c.league))}
+        done = list(conn.execute(
+            select(events.c.sport, events.c.league, func.count().label("n"),
+                   func.min(events.c.start_time).label("oldest"))
+            .where(events.c.state == "post").group_by(events.c.sport, events.c.league)))
+    have = {(r.sport, r.league): r.n for r in done}
+    oldest = {(r.sport, r.league): (r.oldest or "")[:10] for r in done}
     log.info("Sync %s (hasta %s)", "PROFUNDO" if deep else "ligero", end)
 
     stats = {p.name: dict(ok=0, fail=0, rows=0, err="") for p in PROVIDERS}
@@ -1350,7 +1362,14 @@ def run_sync(deep=False):
             if have.get((sport, league), 0) < 25:
                 start = max(season_start(sport, league), today - dt.timedelta(DEEP_BACK))
             else:
+                # liga ya poblada: se vuelve a consultar desde el partido terminado más antiguo
+                # que se conserva (los últimos 10 de cada equipo), para detectar correcciones
                 start = today - dt.timedelta(21)
+                try:
+                    start = min(start, dt.date.fromisoformat(oldest[(sport, league)]))
+                except (KeyError, ValueError):
+                    pass
+                start = max(start, today - dt.timedelta(DEEP_BACK))
         else:
             start = today - dt.timedelta(LIVE_BACK)
         log.info("%s: ventana %s .. %s", name, start, end)
